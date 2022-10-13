@@ -13,6 +13,7 @@ contract Legder is ReentrancyGuard {
         bytes32 indexed receipt,
         uint256 nonce,
         uint256 amount,
+        uint256 total,
         address indexed respondent,
         address indexed claimant
     );
@@ -35,15 +36,18 @@ contract Legder is ReentrancyGuard {
     // for example, if the digit is 6, then 1 USD is repr as 1000000
     uint256 public digits;
 
-    // respondent => claimant => credit
     mapping(address => mapping(address => bool)) private _trust;
+    // respondent => claimant => credit
     mapping(address => mapping(address => uint256)) private _credit;
+    // respondent => claimant => pending
+    mapping(address => mapping(address => uint256)) private _pending;
     mapping(address => uint256) public nonce;
 
     ClaimHelper.ClaimMap private _claims;
 
-    constructor(string memory _currency) {
+    constructor(string memory _currency, uint256 _digits) {
         currency = _currency;
+        digits = _digits;
     }
 
     // claim others for some amount
@@ -59,6 +63,16 @@ contract Legder is ReentrancyGuard {
         // increasing opposit credit anyway
         _credit[msg.sender][respondent] += amount;
 
+        // update pending amount
+        uint256 claimantOwned = _pending[msg.sender][respondent];
+        if (claimantOwned > amount) {
+            // we can use this to pay some debits
+            _pending[msg.sender][respondent] -= amount;
+        } else {
+            _pending[msg.sender][respondent] = 0;
+            _pending[respondent][msg.sender] += (amount - claimantOwned);
+        }
+
         // create claim record
         uint256 currentNonce = nonce[msg.sender];
         nonce[msg.sender] += 1;
@@ -70,7 +84,7 @@ contract Legder is ReentrancyGuard {
         _claims.addClaim(record);
 
         // emit a log
-        emit ClaimLog(receipt, currentNonce, amount, respondent, msg.sender);
+        emit ClaimLog(receipt, currentNonce, amount, _pending[respondent][msg.sender], respondent, msg.sender);
     }
 
     // grant others to allow them to claim
@@ -103,6 +117,14 @@ contract Legder is ReentrancyGuard {
 
         // recover credit
         _credit[msg.sender][record.claimant] += record.amount;
+        // update pending
+        uint256 debits = _pending[msg.sender][record.claimant];
+        if (debits > record.amount) {
+            _pending[msg.sender][record.claimant] -= record.amount;
+        } else {
+            _pending[msg.sender][record.claimant] = 0;
+            _pending[record.claimant][msg.sender] += (record.amount - debits);
+        }
         // remove record from claims
         _claims.deleteClaim(receipt);
         emit ResolveLog(receipt, record.nonce, record.amount, record.respondent, record.claimant);
@@ -117,6 +139,14 @@ contract Legder is ReentrancyGuard {
             ClaimHelper.Claim memory record = _claims.getClaim(receipts[i]);
             // recover credit
             _credit[msg.sender][record.claimant] += record.amount;
+            // update pending
+            uint256 debits = _pending[msg.sender][record.claimant];
+            if (debits > record.amount) {
+                _pending[msg.sender][record.claimant] -= record.amount;
+            } else {
+                _pending[msg.sender][record.claimant] = 0;
+                _pending[record.claimant][msg.sender] += (record.amount - debits);
+            }
             emit ResolveLog(receipts[i], record.nonce, record.amount, record.respondent, record.claimant);
         }
         // remove records from claims
@@ -126,6 +156,14 @@ contract Legder is ReentrancyGuard {
     // get the credit of somebody gives you
     function getCredit(address respondent) public view returns (uint256) {
         return _credit[respondent][msg.sender];
+    }
+
+    // get the current pending amount
+    function getPending(address other) public view returns (uint256, uint256) {
+        return (
+            _pending[msg.sender][other],
+            _pending[other][msg.sender]
+        );
     }
 
     // trust or untrust somebody
